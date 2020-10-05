@@ -1,2 +1,2 @@
-# kml-tools
+# kml-utils
 Utilities for KML files
