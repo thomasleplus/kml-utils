@@ -1,0 +1,81 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use utf8;
+use XML::Simple qw(:strict);
+use Getopt::Long qw(GetOptions);
+use Data::Dump qw(dump);
+
+sub extractPlacemarks($) {
+    my @results = ();
+    my $xml = XMLin(shift(), ForceArray => 0, KeyAttr => [ 'id' ]);
+    my @documents = $xml->{Document};
+    foreach my $document (@documents) {
+	my @folders = $document->{Folder};
+	foreach my $folder (@folders) {
+	    if (ref $folder ne 'ARRAY') {
+		$folder = [ $folder ];
+	    }
+	    foreach my $f (@{$folder}) {
+		my $s1 = $f->{name};
+		chomp($s1);
+		my @placemarks = $f->{Placemark};
+		foreach my $placemark (@placemarks) {
+		    if (ref $placemark ne 'ARRAY') {
+			$placemark = [ $placemark ];
+		    }
+		    foreach my $p (@{$placemark}) {
+			my $s2 = $p->{name};
+			chomp($s2);
+			my $name = $s1 . '/' . $s2;
+			my $coordinates = $p->{Point}->{coordinates};
+			$coordinates =~ s/^\s+|\s+$//g;
+			my ($longitude, $latitude, $altitude) = split(',', $coordinates);
+			push(@results, [ $name, $longitude, $latitude ]);
+		    }
+		}
+	    }
+	}
+    }
+    return @results;
+}
+
+sub computeDistance($$$$) {
+  my $lon1 = shift();
+  my $lat1 = shift();
+  my $lon2 = shift();
+  my $lat2 = shift();
+  my $dLat = deg2rad($lat2-$lat1);
+  my $dLon = deg2rad($lon2-$lon1); 
+  my $a = sin($dLat/2.0) * sin($dLat/2.0) + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon/2.0) * sin($dLon/2.0); 
+  return 12742.0 * atan2(sqrt($a), sqrt(1-$a));
+}
+
+sub deg2rad($) {
+  return shift() * (3.14159265359 / 180.0)
+}
+
+Getopt::Long::Configure qw(gnu_getopt);
+
+my $radius = 1;
+GetOptions('radius|r=f' => \$radius) or die "Usage: $0 [-r radius] file.kml\n";
+
+foreach my $file (@ARGV) {
+    my @placemarks = extractPlacemarks($file);
+    for (my $i = 0; $i < scalar(@placemarks); $i++) {
+	my $min = 999999999;
+	my $closest = $i;
+	for (my $j = 0; $j < scalar(@placemarks); $j++) {
+	    if ($i == $j) {
+		next;
+	    }
+	    my $distance = computeDistance($placemarks[$i][1], $placemarks[$i][2], $placemarks[$j][1], $placemarks[$j][2]);
+	    if ($distance < $min) {
+		$min = $distance;
+		$closest = $j;
+	    }
+	}
+	print $placemarks[$i][0] . ' -> ' . $placemarks[$closest][0] . ' = ' . $min . " km\n";
+    }
+}
