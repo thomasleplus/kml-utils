@@ -7,7 +7,7 @@ use XML::Simple qw(:strict);
 use Getopt::Long qw(GetOptions);
 use Data::Dump qw(dump);
 
-sub extractPlacemarks($) {
+sub extractPlacemarks {
     my @results = ();
     my $xml = XMLin(shift(), ForceArray => 0, KeyAttr => [ 'id' ]);
     my @documents = $xml->{Document};
@@ -41,7 +41,7 @@ sub extractPlacemarks($) {
     return @results;
 }
 
-sub computeDistance($$$$) {
+sub computeDistance {
   my $lon1 = shift();
   my $lat1 = shift();
   my $lon2 = shift();
@@ -52,7 +52,7 @@ sub computeDistance($$$$) {
   return 12742.0 * atan2(sqrt($a), sqrt(1-$a));
 }
 
-sub deg2rad($) {
+sub deg2rad {
   return shift() * (3.14159265359 / 180.0)
 }
 

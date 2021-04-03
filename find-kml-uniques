@@ -6,7 +6,7 @@ use utf8;
 use XML::Simple qw(:strict);
 use Getopt::Long qw(GetOptions);
 
-sub extractPlacemarks($) {
+sub extractPlacemarks {
     my @results = ();
     my $xml = XMLin(shift(), ForceArray => 0, KeyAttr => [ 'id' ]);
     my @documents = $xml->{Document};
@@ -43,7 +43,7 @@ sub extractPlacemarks($) {
     return @results;
 }
 
-sub computeDistance($$$$) {
+sub computeDistance {
   my $lon1 = shift();
   my $lat1 = shift();
   my $lon2 = shift();
@@ -54,7 +54,7 @@ sub computeDistance($$$$) {
   return 12742.0 * atan2(sqrt($a), sqrt(1-$a));
 }
 
-sub deg2rad($) {
+sub deg2rad {
   return shift() * (3.14159265359 / 180.0)
 }
 
@@ -66,7 +66,7 @@ GetOptions('radius|r=f' => \$radius) or die "Usage: $0 [-r radius] file.kml\n";
 my @many = extractPlacemarks($ARGV[0]);
 my @few = extractPlacemarks($ARGV[1]);
 
-binmode STDOUT, ":utf8";
+binmode STDOUT, ":encoding(UTF-8)";
 
 MAIN: for (my $i = 0; $i < scalar(@many); $i++) {
     for (my $j = 0; $j < scalar(@few); $j++) {
