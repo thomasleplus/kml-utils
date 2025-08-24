@@ -20,12 +20,14 @@ jobs:
       - name: Install YAMLLint
         shell: bash
         run: |
-          pip install yamllint==1.37.1
-          msg="$(pip list --outdated | grep -e yamllint || true)"
-          if [ -n "${msg}" ]; then
-            >&2 echo "ERROR: outdated: ${msg}"
-            exit 1
-          fi
+          set -euo pipefail
+          IFS=$'\n\t'
+          sudo pipx ensurepath --global
+          sudo pipx install --global yamllint==1.37.1
+          sudo pipx upgrade-all --global | tee -a /dev/stderr | grep -q -e . && exit 1
       - name: Run YAMLLint
         shell: bash
-        run: "yamllint -d '{extends: default, rules: {line-length: disable}}' ."
+        run: |
+          set -euo pipefail
+          IFS=$'\n\t'
+          yamllint -d '{extends: default, rules: {line-length: disable}}' .
