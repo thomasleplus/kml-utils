@@ -17,14 +17,6 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      - name: Install YAMLLint
-        shell: bash
-        run: |
-          set -euo pipefail
-          IFS=$'\n\t'
-          sudo pipx ensurepath --global
-          sudo pipx install --global yamllint==1.37.1
-          sudo pipx upgrade-all --global | tee -a /dev/stderr | grep -q -e . && exit 1
       - name: Run YAMLLint
         shell: bash
         run: |
