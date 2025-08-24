@@ -24,7 +24,7 @@ jobs:
           IFS=$'\n\t'
           sudo apt update
           sudo apt install --no-install-recommends -y libperl-critic-perl=1.152-1
-          sudo apt-get -s upgrade | tee -a /dev/stderr | grep -q -e '^Inst ' && exit 1
+          sudo apt-get -s upgrade | tee -a /dev/stderr | grep -q -e '^Inst libperl-critic-perl ' && exit 1
       - name: Run PerlCritic
         shell: bash
         run: |
