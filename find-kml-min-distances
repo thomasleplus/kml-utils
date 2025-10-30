@@ -1,4 +1,7 @@
 #!/usr/bin/perl
+# Analyzes a KML file and for each placemark, finds its nearest neighbor and reports the distance
+# between them in kilometers. Useful for understanding the density and spacing of placemarks.
+# Usage: find-kml-min-distances file.kml
 
 use strict;
 use warnings;
@@ -12,13 +15,14 @@ sub extractPlacemarks {
     my $xml = XMLin(shift(), ForceArray => 0, KeyAttr => [ 'id' ]);
     my @documents = $xml->{Document};
     foreach my $document (@documents) {
+	# Process placemarks within folders
 	my @folders = $document->{Folder};
 	foreach my $folder (@folders) {
 	    if (ref $folder ne 'ARRAY') {
 		$folder = [ $folder ];
 	    }
 	    foreach my $f (@{$folder}) {
-		my $s1 = $f->{name};
+		my $s1 = $f->{name} // '';
 		chomp($s1);
 		my @placemarks = $f->{Placemark};
 		foreach my $placemark (@placemarks) {
@@ -26,14 +30,35 @@ sub extractPlacemarks {
 			$placemark = [ $placemark ];
 		    }
 		    foreach my $p (@{$placemark}) {
-			my $s2 = $p->{name};
+			my $s2 = $p->{name} // '';
 			chomp($s2);
 			my $name = $s1 . '/' . $s2;
 			my $coordinates = $p->{Point}->{coordinates};
+			next unless defined $coordinates;
 			$coordinates =~ s/^\s+|\s+$//g;
 			my ($longitude, $latitude, $altitude) = split(',', $coordinates);
+			next unless defined $longitude && defined $latitude;
 			push(@results, [ $name, $longitude, $latitude ]);
 		    }
+		}
+	    }
+	}
+	# Process placemarks directly under document
+	if ($document->{Placemark}) {
+	    my @placemarks = $document->{Placemark};
+	    foreach my $placemark (@placemarks) {
+		if (ref $placemark ne 'ARRAY') {
+		    $placemark = [ $placemark ];
+		}
+		foreach my $p (@{$placemark}) {
+		    my $s2 = $p->{name} // '';
+		    chomp($s2);
+		    my $coordinates = $p->{Point}->{coordinates};
+		    next unless defined $coordinates;
+		    $coordinates =~ s/^\s+|\s+$//g;
+		    my ($longitude, $latitude, $altitude) = split(',', $coordinates);
+		    next unless defined $longitude && defined $latitude;
+		    push(@results, [ $s2, $longitude, $latitude ]);
 		}
 	    }
 	}
@@ -46,9 +71,10 @@ sub computeDistance {
   my $lat1 = shift();
   my $lon2 = shift();
   my $lat2 = shift();
+  return 999999999 unless defined $lon1 && defined $lat1 && defined $lon2 && defined $lat2;
   my $dLat = deg2rad($lat2-$lat1);
-  my $dLon = deg2rad($lon2-$lon1); 
-  my $a = sin($dLat/2.0) * sin($dLat/2.0) + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon/2.0) * sin($dLon/2.0); 
+  my $dLon = deg2rad($lon2-$lon1);
+  my $a = sin($dLat/2.0) * sin($dLat/2.0) + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon/2.0) * sin($dLon/2.0);
   return 12742.0 * atan2(sqrt($a), sqrt(1-$a));
 }
 
@@ -58,8 +84,7 @@ sub deg2rad {
 
 Getopt::Long::Configure qw(gnu_getopt);
 
-my $radius = 1;
-GetOptions('radius|r=f' => \$radius) or die "Usage: $0 [-r radius] file.kml\n";
+binmode(STDOUT, ":utf8");
 
 foreach my $file (@ARGV) {
     my @placemarks = extractPlacemarks($file);

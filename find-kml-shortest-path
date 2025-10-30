@@ -1,0 +1,239 @@
+#!/usr/bin/perl
+# Finds the shortest path to visit all placemarks in a KML file using the traveling salesman
+# approach. Uses nearest neighbor heuristic followed by 2-opt optimization to minimize total
+# distance. Outputs a new KML file with a LineString showing the optimized route.
+
+use strict;
+use warnings;
+use utf8;
+use XML::Simple qw(:strict);
+use Getopt::Long qw(GetOptions);
+
+sub extractPlacemarks {
+    my @results = ();
+    my $xml = XMLin(shift(), ForceArray => 0, KeyAttr => [ 'id' ]);
+    my @documents = $xml->{Document};
+    foreach my $document (@documents) {
+	# Process placemarks within folders
+	my @folders = $document->{Folder};
+	foreach my $folder (@folders) {
+	    if (ref $folder ne 'ARRAY') {
+		$folder = [ $folder ];
+	    }
+	    foreach my $f (@{$folder}) {
+		my $s1 = $f->{name} // 'Unnamed Folder';
+		chomp($s1);
+		my @placemarks = $f->{Placemark};
+		foreach my $placemark (@placemarks) {
+		    if (ref $placemark ne 'ARRAY') {
+			$placemark = [ $placemark ];
+		    }
+		    foreach my $p (@{$placemark}) {
+			my $s2 = $p->{name} // 'Unnamed Placemark';
+			chomp($s2);
+			my $name = $s1 . '/' . $s2;
+
+			# Skip placemarks without Point geometry or coordinates
+			next unless $p->{Point};
+			my $coordinates = $p->{Point}->{coordinates};
+			next unless defined $coordinates;
+
+			$coordinates =~ s/^\s+|\s+$//g;
+			my ($longitude, $latitude, $altitude) = split(',', $coordinates);
+
+			# Skip if coordinates didn't parse correctly
+			next unless defined $longitude && defined $latitude;
+
+			push(@results, [ $name, $longitude, $latitude ]);
+		    }
+		}
+	    }
+	}
+	# Process placemarks directly under document
+	if ($document->{Placemark}) {
+	    my @placemarks = $document->{Placemark};
+	    foreach my $placemark (@placemarks) {
+		if (ref $placemark ne 'ARRAY') {
+		    $placemark = [ $placemark ];
+		}
+		foreach my $p (@{$placemark}) {
+		    my $s2 = $p->{name} // 'Unnamed Placemark';
+		    chomp($s2);
+
+		    # Skip placemarks without Point geometry or coordinates
+		    next unless $p->{Point};
+		    my $coordinates = $p->{Point}->{coordinates};
+		    next unless defined $coordinates;
+
+		    $coordinates =~ s/^\s+|\s+$//g;
+		    my ($longitude, $latitude, $altitude) = split(',', $coordinates);
+
+		    # Skip if coordinates didn't parse correctly
+		    next unless defined $longitude && defined $latitude;
+
+		    push(@results, [ $s2, $longitude, $latitude ]);
+		}
+	    }
+	}
+    }
+    return @results;
+}
+
+sub computeDistance {
+  my $lon1 = shift();
+  my $lat1 = shift();
+  my $lon2 = shift();
+  my $lat2 = shift();
+  my $dLat = deg2rad($lat2-$lat1);
+  my $dLon = deg2rad($lon2-$lon1); 
+  my $a = sin($dLat/2.0) * sin($dLat/2.0) + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon/2.0) * sin($dLon/2.0); 
+  return 12742.0 * atan2(sqrt($a), sqrt(1-$a));
+}
+
+sub deg2rad {
+  return shift() * (3.14159265359 / 180.0)
+}
+
+sub pathDistance {
+  my $pathRef = shift();
+  my @path = @{$pathRef};
+  my $totalDist = 0;
+  for (my $i = 0; $i < scalar(@path) - 1; $i++) {
+    $totalDist += computeDistance($path[$i]->[1], $path[$i]->[2],
+                                   $path[$i+1]->[1], $path[$i+1]->[2]);
+  }
+  return $totalDist;
+}
+
+sub twoOptSwap {
+  my ($pathRef, $i, $j) = @_;
+  # Reverse the segment between i+1 and j (inclusive)
+  my @newPath = @{$pathRef}[0..$i];
+  push(@newPath, reverse(@{$pathRef}[$i+1..$j]));
+  push(@newPath, @{$pathRef}[$j+1..$#{$pathRef}]);
+  @{$pathRef} = @newPath;
+}
+
+sub twoOptImprove {
+  my $pathRef = shift();
+  my $improved = 1;
+  my $iterations = 0;
+
+  while ($improved && $iterations < 1000) {
+    $improved = 0;
+    $iterations++;
+
+    for (my $i = 0; $i < scalar(@{$pathRef}) - 2; $i++) {
+      for (my $j = $i + 2; $j < scalar(@{$pathRef}); $j++) {
+        # Skip if j is the last node and i is 0 (no improvement possible)
+        next if ($i == 0 && $j == scalar(@{$pathRef}) - 1);
+
+        # Calculate current distance of edges (i, i+1) and (j, j+1)
+        my $currentDist = computeDistance($pathRef->[$i]->[1], $pathRef->[$i]->[2],
+                                          $pathRef->[$i+1]->[1], $pathRef->[$i+1]->[2]);
+
+        if ($j < scalar(@{$pathRef}) - 1) {
+          $currentDist += computeDistance($pathRef->[$j]->[1], $pathRef->[$j]->[2],
+                                          $pathRef->[$j+1]->[1], $pathRef->[$j+1]->[2]);
+        }
+
+        # Calculate new distance after 2-opt swap
+        my $newDist = computeDistance($pathRef->[$i]->[1], $pathRef->[$i]->[2],
+                                      $pathRef->[$j]->[1], $pathRef->[$j]->[2]);
+
+        if ($j < scalar(@{$pathRef}) - 1) {
+          $newDist += computeDistance($pathRef->[$i+1]->[1], $pathRef->[$i+1]->[2],
+                                      $pathRef->[$j+1]->[1], $pathRef->[$j+1]->[2]);
+        }
+
+        # If improvement found, apply swap
+        if ($newDist < $currentDist) {
+          twoOptSwap($pathRef, $i, $j);
+          $improved = 1;
+        }
+      }
+    }
+  }
+}
+
+foreach my $file (@ARGV) {
+    my @placemarks = extractPlacemarks($file);
+
+    if (scalar(@placemarks) < 2) {
+        print STDERR "Skipping $file: not enough placemarks\n";
+        next;
+    }
+
+    # Find shortest path using nearest neighbor algorithm
+    my @path = ();
+    my @unvisited = @placemarks;
+
+    # Start with first placemark
+    my $current = shift(@unvisited);
+    push(@path, $current);
+
+    # Greedily select nearest neighbor
+    while (@unvisited) {
+        my $minDist = 1e10;
+        my $minIdx = -1;
+
+        for (my $i = 0; $i < scalar(@unvisited); $i++) {
+            my $dist = computeDistance($current->[1], $current->[2],
+                                      $unvisited[$i]->[1], $unvisited[$i]->[2]);
+            if ($dist < $minDist) {
+                $minDist = $dist;
+                $minIdx = $i;
+            }
+        }
+
+        $current = splice(@unvisited, $minIdx, 1);
+        push(@path, $current);
+    }
+
+    # Apply 2-opt optimization to improve the path
+    my $initialDist = pathDistance(\@path);
+    twoOptImprove(\@path);
+    my $optimizedDist = pathDistance(\@path);
+    my $improvement = (($initialDist - $optimizedDist) / $initialDist) * 100;
+    printf STDERR "Initial path: %.2f km, Optimized: %.2f km (%.1f%% improvement)\n",
+           $initialDist, $optimizedDist, $improvement;
+
+    # Build coordinates string for LineString
+    my $coordsStr = "";
+    foreach my $point (@path) {
+        $coordsStr .= "$point->[1],$point->[2],0\n";
+    }
+    $coordsStr =~ s/\s+$//;
+
+    # Read and parse the KML file
+    my $xml = XMLin($file, ForceArray => 0, KeyAttr => [ 'id' ]);
+
+    # Create new folder with LineString
+    my $newFolder = {
+        name => 'Shortest Path',
+        Placemark => {
+            name => 'Route',
+            LineString => {
+                coordinates => $coordsStr
+            }
+        }
+    };
+
+    # Print KML manually to ensure proper element structure
+    print "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    print "<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n";
+    print "  <Document>\n";
+    print "    <Folder>\n";
+    print "      <name>Shortest Path</name>\n";
+    print "      <Placemark>\n";
+    print "        <name>Route</name>\n";
+    print "        <LineString>\n";
+    print "          <coordinates>\n";
+    print $coordsStr . "\n";
+    print "          </coordinates>\n";
+    print "        </LineString>\n";
+    print "      </Placemark>\n";
+    print "    </Folder>\n";
+    print "  </Document>\n";
+    print "</kml>\n";
+}
