@@ -156,6 +156,8 @@ sub twoOptImprove {
   }
 }
 
+binmode STDOUT, ":encoding(UTF-8)";
+
 foreach my $file (@ARGV) {
     my @placemarks = extractPlacemarks($file);
 

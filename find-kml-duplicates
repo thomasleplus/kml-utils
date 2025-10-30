@@ -10,8 +10,6 @@ use utf8;
 use XML::Simple qw(:strict);
 use Getopt::Long qw(GetOptions);
 
-binmode(STDOUT, ":utf8");
-
 sub extractPlacemarks {
     my @results = ();
     my $xml = XMLin(shift(), ForceArray => 0, KeyAttr => [ 'id' ]);
@@ -84,6 +82,8 @@ sub deg2rad {
 }
 
 Getopt::Long::Configure qw(gnu_getopt);
+
+binmode STDOUT, ":encoding(UTF-8)";
 
 my $radius = 1;
 GetOptions('radius|r=f' => \$radius) or die "Usage: $0 [-r radius] file.kml\n";

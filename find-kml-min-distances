@@ -84,7 +84,7 @@ sub deg2rad {
 
 Getopt::Long::Configure qw(gnu_getopt);
 
-binmode(STDOUT, ":utf8");
+binmode STDOUT, ":encoding(UTF-8)";
 
 foreach my $file (@ARGV) {
     my @placemarks = extractPlacemarks($file);
