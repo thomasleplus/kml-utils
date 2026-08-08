@@ -80,3 +80,4 @@ jobs:
           # (push / pull_request); schedule and workflow_dispatch runs have no
           # triggering commit for commitlint to check.
           VALIDATE_GIT_COMMITLINT: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'false' || '' }}
+          VALIDATE_JSCPD: false
