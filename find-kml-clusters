@@ -1,0 +1,355 @@
+#!/usr/bin/perl
+# Finds high-value clusters of placemarks ("most bang for your buck") in a KML file.
+# Groups placemarks into walkable clusters (connected components whose members are
+# within --epsilon metres of a neighbour), computes an optimized walking route per
+# cluster (nearest neighbor heuristic followed by 2-opt), keeps clusters worth at
+# least --min-points whose route length falls within [--min-dist, --max-dist] metres,
+# ranks the survivors by points per kilometre, and outputs a new KML file with one
+# folder per cluster (its placemarks plus a LineString showing the route).
+
+use strict;
+use warnings;
+use utf8;
+use XML::Simple qw(:strict);
+use Getopt::Long qw(GetOptions);
+
+sub usage {
+    print STDERR <<"EOF";
+Usage: $0 --epsilon M --min-points P --min-dist M --max-dist M [options] FILE...
+
+Required:
+  --epsilon M          max metres between neighbouring placemarks (cluster link distance)
+  --min-points P       drop clusters worth fewer total points than P
+  --min-dist M         drop clusters whose route is shorter than M metres
+  --max-dist M         drop clusters whose route is longer than M metres
+
+Optional:
+  --points-pattern RE  regex with one capture group giving a placemark's points,
+                       matched against "name description" (default: none)
+  --default-points N   points used when no pattern is given, or the pattern does not
+                       match a placemark (default: 1)
+EOF
+    exit 1;
+}
+
+my ($epsilon, $minPoints, $minDist, $maxDist, $pointsPattern);
+my $defaultPoints = 1;
+GetOptions(
+    'epsilon=f'        => \$epsilon,
+    'min-points=f'     => \$minPoints,
+    'min-dist=f'       => \$minDist,
+    'max-dist=f'       => \$maxDist,
+    'points-pattern=s' => \$pointsPattern,
+    'default-points=f' => \$defaultPoints,
+) or usage();
+
+# Validate required options
+foreach my $req ([ '--epsilon', $epsilon ], [ '--min-points', $minPoints ],
+                 [ '--min-dist', $minDist ], [ '--max-dist', $maxDist ]) {
+    unless (defined $req->[1]) {
+        print STDERR "Missing required option $req->[0]\n";
+        usage();
+    }
+}
+usage() unless @ARGV;
+
+# Compile the points pattern once, if given
+my $pointsRe;
+if (defined $pointsPattern) {
+    $pointsRe = eval { qr/$pointsPattern/ };
+    unless (defined $pointsRe) {
+        print STDERR "Invalid --points-pattern: $@";
+        exit 1;
+    }
+}
+
+# Derive a placemark's point value from its "name description" text
+sub computePoints {
+    my $text = shift() // '';
+    if (defined $pointsRe && $text =~ $pointsRe) {
+        my $value = $1;
+        return $value if defined $value && $value =~ /^\d+(?:\.\d+)?$/;
+    }
+    return $defaultPoints;
+}
+
+# Add every Point placemark in $placemark (scalar or array) to @{$results}
+sub addPlacemarks {
+    my ($placemark, $prefix, $results) = @_;
+    return unless defined $placemark;
+    my $list = ref $placemark eq 'ARRAY' ? $placemark : [ $placemark ];
+    foreach my $p (@{$list}) {
+        my $name = $p->{name} // 'Unnamed Placemark';
+        chomp($name);
+        $name = "$prefix/$name" if defined $prefix;
+
+        # Skip placemarks without Point geometry or coordinates
+        next unless $p->{Point};
+        my $coordinates = $p->{Point}->{coordinates};
+        next unless defined $coordinates;
+        $coordinates =~ s/^\s+|\s+$//g;
+        my ($longitude, $latitude) = split(',', $coordinates);
+        next unless defined $longitude && defined $latitude;
+
+        # Description may be plain text or a hash with mixed content
+        my $description = $p->{description};
+        $description = $description->{content} if ref $description eq 'HASH';
+        $description = '' if !defined $description || ref $description;
+
+        my $points = computePoints("$name $description");
+        push(@{$results}, [ $name, $longitude + 0, $latitude + 0, $points ]);
+    }
+}
+
+sub extractPlacemarks {
+    my @results = ();
+    my $xml = XMLin(shift(), ForceArray => 0, KeyAttr => [ 'id' ]);
+    my $documents = ref $xml->{Document} eq 'ARRAY' ? $xml->{Document} : [ $xml->{Document} ];
+    foreach my $document (@{$documents}) {
+        next unless defined $document;
+        # Placemarks within folders
+        if ($document->{Folder}) {
+            my $folders = ref $document->{Folder} eq 'ARRAY' ? $document->{Folder} : [ $document->{Folder} ];
+            foreach my $f (@{$folders}) {
+                my $prefix = $f->{name} // 'Unnamed Folder';
+                chomp($prefix);
+                addPlacemarks($f->{Placemark}, $prefix, \@results);
+            }
+        }
+        # Placemarks directly under the document
+        addPlacemarks($document->{Placemark}, undef, \@results);
+    }
+    return @results;
+}
+
+sub computeDistance {
+  my $lon1 = shift();
+  my $lat1 = shift();
+  my $lon2 = shift();
+  my $lat2 = shift();
+  my $dLat = deg2rad($lat2-$lat1);
+  my $dLon = deg2rad($lon2-$lon1);
+  my $a = sin($dLat/2.0) * sin($dLat/2.0) + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon/2.0) * sin($dLon/2.0);
+  return 12742.0 * atan2(sqrt($a), sqrt(1-$a));
+}
+
+sub deg2rad {
+  return shift() * (3.14159265359 / 180.0)
+}
+
+sub pathDistance {
+  my $pathRef = shift();
+  my @path = @{$pathRef};
+  my $totalDist = 0;
+  for (my $i = 0; $i < scalar(@path) - 1; $i++) {
+    $totalDist += computeDistance($path[$i]->[1], $path[$i]->[2],
+                                   $path[$i+1]->[1], $path[$i+1]->[2]);
+  }
+  return $totalDist;
+}
+
+sub twoOptSwap {
+  my ($pathRef, $i, $j) = @_;
+  # Reverse the segment between i+1 and j (inclusive)
+  my @newPath = @{$pathRef}[0..$i];
+  push(@newPath, reverse(@{$pathRef}[$i+1..$j]));
+  push(@newPath, @{$pathRef}[$j+1..$#{$pathRef}]);
+  @{$pathRef} = @newPath;
+}
+
+sub twoOptImprove {
+  my $pathRef = shift();
+  my $improved = 1;
+  my $iterations = 0;
+
+  while ($improved && $iterations < 1000) {
+    $improved = 0;
+    $iterations++;
+
+    for (my $i = 0; $i < scalar(@{$pathRef}) - 2; $i++) {
+      for (my $j = $i + 2; $j < scalar(@{$pathRef}); $j++) {
+        # Skip if j is the last node and i is 0 (no improvement possible)
+        next if ($i == 0 && $j == scalar(@{$pathRef}) - 1);
+
+        # Calculate current distance of edges (i, i+1) and (j, j+1)
+        my $currentDist = computeDistance($pathRef->[$i]->[1], $pathRef->[$i]->[2],
+                                          $pathRef->[$i+1]->[1], $pathRef->[$i+1]->[2]);
+
+        if ($j < scalar(@{$pathRef}) - 1) {
+          $currentDist += computeDistance($pathRef->[$j]->[1], $pathRef->[$j]->[2],
+                                          $pathRef->[$j+1]->[1], $pathRef->[$j+1]->[2]);
+        }
+
+        # Calculate new distance after 2-opt swap
+        my $newDist = computeDistance($pathRef->[$i]->[1], $pathRef->[$i]->[2],
+                                      $pathRef->[$j]->[1], $pathRef->[$j]->[2]);
+
+        if ($j < scalar(@{$pathRef}) - 1) {
+          $newDist += computeDistance($pathRef->[$i+1]->[1], $pathRef->[$i+1]->[2],
+                                      $pathRef->[$j+1]->[1], $pathRef->[$j+1]->[2]);
+        }
+
+        # If improvement found, apply swap
+        if ($newDist < $currentDist) {
+          twoOptSwap($pathRef, $i, $j);
+          $improved = 1;
+        }
+      }
+    }
+  }
+}
+
+# Group placemarks into connected components: two placemarks are linked when within
+# $epsilonMeters of each other, and a cluster is a maximal set of transitively linked
+# placemarks. Returns a list of array references, each holding one cluster's placemarks.
+sub clusterPlacemarks {
+    my ($pmRef, $epsilonMeters) = @_;
+    my @pm = @{$pmRef};
+    my $n = scalar(@pm);
+    my @parent = (0 .. $n - 1);
+
+    # Union-find with iterative path compression (avoids deep recursion on large inputs)
+    my $find = sub {
+        my $x = shift();
+        my $root = $x;
+        $root = $parent[$root] while $parent[$root] != $root;
+        while ($parent[$x] != $root) {
+            my $next = $parent[$x];
+            $parent[$x] = $root;
+            $x = $next;
+        }
+        return $root;
+    };
+
+    my $epsilonKm = $epsilonMeters / 1000.0;
+    for (my $i = 0; $i < $n; $i++) {
+        for (my $j = $i + 1; $j < $n; $j++) {
+            my $dist = computeDistance($pm[$i]->[1], $pm[$i]->[2], $pm[$j]->[1], $pm[$j]->[2]);
+            if ($dist <= $epsilonKm) {
+                my ($ri, $rj) = ($find->($i), $find->($j));
+                $parent[$ri] = $rj if $ri != $rj;
+            }
+        }
+    }
+
+    my %groups;
+    for (my $i = 0; $i < $n; $i++) {
+        push(@{$groups{$find->($i)}}, $pm[$i]);
+    }
+    return values %groups;
+}
+
+# Optimized walking route (nearest neighbor + 2-opt) through one cluster's placemarks
+sub routeForCluster {
+    my $clusterRef = shift();
+    my @path = ();
+    my @unvisited = @{$clusterRef};
+
+    my $current = shift(@unvisited);
+    push(@path, $current);
+    while (@unvisited) {
+        my $minDist = 1e10;
+        my $minIdx = -1;
+        for (my $i = 0; $i < scalar(@unvisited); $i++) {
+            my $dist = computeDistance($current->[1], $current->[2],
+                                       $unvisited[$i]->[1], $unvisited[$i]->[2]);
+            if ($dist < $minDist) {
+                $minDist = $dist;
+                $minIdx = $i;
+            }
+        }
+        $current = splice(@unvisited, $minIdx, 1);
+        push(@path, $current);
+    }
+
+    twoOptImprove(\@path);
+    return \@path;
+}
+
+sub xmlEscape {
+    my $s = shift() // '';
+    $s =~ s/&/&amp;/g;
+    $s =~ s/</&lt;/g;
+    $s =~ s/>/&gt;/g;
+    return $s;
+}
+
+binmode STDOUT, ":encoding(UTF-8)";
+binmode STDERR, ":encoding(UTF-8)";
+
+foreach my $file (@ARGV) {
+    my @placemarks = extractPlacemarks($file);
+
+    if (scalar(@placemarks) < 2) {
+        print STDERR "Skipping $file: not enough placemarks\n";
+        next;
+    }
+
+    my @clusters = clusterPlacemarks(\@placemarks, $epsilon);
+
+    # Route, score and filter each cluster
+    my @kept = ();
+    foreach my $cluster (@clusters) {
+        my $totalPoints = 0;
+        $totalPoints += $_->[3] foreach @{$cluster};
+        next if $totalPoints < $minPoints;
+
+        my $path = routeForCluster($cluster);
+        my $distKm = pathDistance($path);
+        my $distM = $distKm * 1000.0;
+        next if $distM < $minDist || $distM > $maxDist;
+        next if $distKm <= 0;
+
+        push(@kept, {
+            path   => $path,
+            points => $totalPoints,
+            distM  => $distM,
+            ppk    => $totalPoints / $distKm,
+        });
+    }
+
+    # Rank by points per kilometre, best first
+    @kept = sort { $b->{ppk} <=> $a->{ppk} } @kept;
+
+    printf STDERR "%s: %d placemarks, %d clusters, %d kept\n",
+           $file, scalar(@placemarks), scalar(@clusters), scalar(@kept);
+    my $rank = 0;
+    foreach my $c (@kept) {
+        $rank++;
+        printf STDERR "  %2d. %3d placemarks, %6.0f pts, %6.0f m, %6.1f pts/km\n",
+               $rank, scalar(@{$c->{path}}), $c->{points}, $c->{distM}, $c->{ppk};
+    }
+
+    # Emit KML: one folder per cluster (placemarks + route), ranked best first
+    print "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    print "<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n";
+    print "  <Document>\n";
+    print "    <name>Clusters</name>\n";
+
+    $rank = 0;
+    foreach my $c (@kept) {
+        $rank++;
+        my $path = $c->{path};
+        my $label = sprintf("Cluster %d - %d placemarks, %d pts, %.0f m, %.1f pts/km",
+                            $rank, scalar(@{$path}), $c->{points}, $c->{distM}, $c->{ppk});
+
+        print "    <Folder>\n";
+        print "      <name>" . xmlEscape($label) . "</name>\n";
+
+        my $coordsStr = "";
+        $coordsStr .= "$_->[1],$_->[2],0\n" foreach @{$path};
+        $coordsStr =~ s/\s+$//;
+        print "      <Placemark>\n";
+        print "        <name>Route</name>\n";
+        print "        <LineString>\n";
+        print "          <coordinates>\n";
+        print $coordsStr . "\n";
+        print "          </coordinates>\n";
+        print "        </LineString>\n";
+        print "      </Placemark>\n";
+        print "    </Folder>\n";
+    }
+
+    print "  </Document>\n";
+    print "</kml>\n";
+}
